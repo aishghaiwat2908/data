@@ -68,7 +68,7 @@ def lambda_handler(event, context):
     try:
         connection = connect_database()
         geocoder = GeocodeService()
-        request_id = body.get("request_id", body.get("req_id"))
+        request_id = body.get("request_id") or body.get("req_id")
         beneficiary_id = body.get("beneficiary_id")
         try:
             beneficiary = resolve_beneficiary_location(
