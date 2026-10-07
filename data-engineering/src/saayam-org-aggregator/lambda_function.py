@@ -10,7 +10,7 @@ from decimal import Decimal
 from distance import GeocodeService, add_distances
 from helpers import (
     connect_database, get_ai_orgs, get_orgs_from_db, merge_organizations,
-    resolve_beneficiary_location,
+    get_request_context, resolve_beneficiary_location,
 )
 
 
@@ -60,28 +60,43 @@ def lambda_handler(event, context):
     except (ValueError, json.JSONDecodeError) as exc:
         return _response(400, {"error": str(exc)})
 
-    location, category = body.get("location"), body.get("category")
-    if not location or not category:
-        return _response(400, {"error": "location and category are required fields"})
+    request_id = body.get("request_id") or body.get("req_id")
+    if request_id is None and (not body.get("location") or not body.get("category")):
+        return _response(400, {"error": "request_id or location and category are required"})
 
     connection = None
     try:
         connection = connect_database()
         geocoder = GeocodeService()
-        request_id = body.get("request_id") or body.get("req_id")
         beneficiary_id = body.get("beneficiary_id")
+        if request_id is not None:
+            context = get_request_context(connection, request_id, beneficiary_id)
+            if context is None:
+                return _response(404, {"error": "Request or beneficiary not found"})
+            beneficiary_id = context["beneficiary_id"]
+            location = context["location"]
+            category = context["category"]
+            subject = context["subject"]
+            description = context["description"]
+        else:
+            location = body["location"]
+            category = body["category"]
+            subject = body.get("subject")
+            description = body.get("description")
+        if not category:
+            return _response(422, {"error": "Request category is unavailable"})
         try:
             beneficiary = resolve_beneficiary_location(
-                connection, request_id, beneficiary_id, geocoder,
+                connection, request_id, beneficiary_id, geocoder, return_status=True,
             )
         except Exception:
             LOGGER.exception("Beneficiary location lookup failed")
-            beneficiary = None
+            beneficiary = {"coordinates": None, "status": "error"}
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             db_future = executor.submit(get_orgs_from_db, connection, location, category)
             ai_future = executor.submit(
-                get_ai_orgs, body.get("subject"), body.get("description"), location,
+                get_ai_orgs, subject, description, location, category,
             )
             try:
                 db_rows = db_future.result()

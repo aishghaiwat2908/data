@@ -35,11 +35,41 @@ class DistanceTests(unittest.TestCase):
         calls = []
         def rows(connection, query, params=()):
             calls.append((query, params))
+            if "information_schema.columns" in query:
+                return [{"udt_name": "text"}]
             return [{"req_id": 9, "beneficiary_id": 4, "req_loc": "longitude:0,latitude:0"}]
         with patch.object(helpers, "fetch_rows", side_effect=rows):
             self.assertEqual(helpers.resolve_beneficiary_location(None, 9, 4), (0.0, 0.0))
             self.assertIsNone(helpers.resolve_beneficiary_location(None, 9, 5))
-        self.assertEqual(len(calls), 2)  # No viewer/current/profile lookup.
+        self.assertEqual(len(calls), 6)  # Only schema metadata + request, never viewer/current/profile.
+
+    def test_alternate_live_identity_and_current_location_columns(self):
+        def rows(connection, query, params=()):
+            if "SELECT column_name" in query and params[1] == "requests":
+                return [{"column_name": name} for name in ("request_id", "req_for_id", "req_loc")]
+            if "SELECT column_name" in query and params[1] == "user_locations":
+                return [{"column_name": name} for name in ("beneficiary_id", "curr_loc", "updated_at")]
+            if "SELECT udt_name" in query:
+                return [{"udt_name": "text"}]
+            if ".requests" in query:
+                self.assertIn("r.request_id = %s", query)
+                return [{"req_id": 9, "beneficiary_id": 4, "req_loc": None}]
+            if ".user_locations" in query:
+                self.assertIn("ul.beneficiary_id = %s", query)
+                self.assertIn("ORDER BY ul.updated_at", query)
+                return [{"curr_loc": "POINT(-120 35)"}]
+            raise AssertionError("Profile should not be queried")
+        with patch.object(helpers, "fetch_rows", side_effect=rows):
+            self.assertEqual(helpers.resolve_beneficiary_location(None, request_id=9), (35.0, -120.0))
+
+    def test_postgis_columns_are_converted_to_wkt_before_parsing(self):
+        def rows(connection, query, params=()):
+            if "information_schema.columns" in query:
+                return [{"udt_name": "geography"}]
+            self.assertIn("ST_AsText(r.req_loc::geometry) AS req_loc", query)
+            return [{"req_id": 9, "beneficiary_id": 4, "req_loc": "POINT(-122 37)"}]
+        with patch.object(helpers, "fetch_rows", side_effect=rows):
+            self.assertEqual(helpers.resolve_beneficiary_location(None, 9), (37.0, -122.0))
 
     def test_current_location_then_profile_address_fallback(self):
         def rows(connection, query, params=()):
@@ -66,10 +96,40 @@ class DistanceTests(unittest.TestCase):
             self.assertEqual(helpers.resolve_beneficiary_location(None, 9, geocoder=Geocoder()), (36.0, -121.0))
         self.assertEqual(addresses, ["10 Main St, San Jose, California, 95101, United States"])
 
+    def test_profile_city_table_and_deferred_geocoding_status(self):
+        def rows(connection, query, params=()):
+            if "SELECT column_name" in query:
+                names = {
+                    "requests": ("req_id", "beneficiary_id", "req_loc"),
+                    "user_locations": ("user_id", "curr_loc", "last_updated_at"),
+                    "users": ("user_id", "addr_ln1", "city_id", "state_id", "country_id"),
+                    "cities": ("city_id", "city_name"),
+                    "states": ("state_id", "state_name"),
+                    "countries": ("country_id", "country_name"),
+                }
+                return [{"column_name": name} for name in names[params[1]]]
+            if "SELECT udt_name" in query:
+                return [{"udt_name": "text"}]
+            if ".requests" in query:
+                return [{"req_id": 9, "beneficiary_id": 4, "req_loc": None}]
+            if ".user_locations" in query:
+                return []
+            self.assertIn("LEFT JOIN virginia_dev_saayam_rdbms.cities", query)
+            return [{"addr_ln1": "Main St", "city_name": "San Jose", "state_name": "California", "country_name": "United States"}]
+        service = distance.GeocodeService(provider=lambda address: None, cache={})
+        with patch.object(helpers, "fetch_rows", side_effect=rows):
+            location = helpers.resolve_beneficiary_location(None, 9, geocoder=service, return_status=True)
+        self.assertEqual(location, {"coordinates": None, "status": "not_found"})
+        result = distance.add_distances([{"name": "Located", "location": "San Jose, CA"}], location, service)
+        self.assertIsNone(result[0]["distance"])
+        self.assertEqual(result[0]["distance_status"], "not_found")
+
     def test_beneficiary_only_uses_own_latest_request_not_viewer(self):
         def rows(connection, query, params=()):
+            if "information_schema.columns" in query:
+                return [{"udt_name": "text"}]
             self.assertEqual(params, (4,))
-            self.assertIn("WHERE beneficiary_id = %s", query)
+            self.assertIn("WHERE r.beneficiary_id = %s", query)
             return [{"beneficiary_id": 4, "req_loc": "POINT(-121 36)"}]
         with patch.object(helpers, "fetch_rows", side_effect=rows):
             self.assertEqual(helpers.resolve_beneficiary_location(None, beneficiary_id=4), (36.0, -121.0))
@@ -86,6 +146,26 @@ class DistanceTests(unittest.TestCase):
         self.assertEqual(rows[0]["rating"], 5)
         self.assertTrue(rows[0]["Collaborator"])
         self.assertIn("10 Main St", distance.organization_address(rows[0]))
+
+    def test_request_context_reads_real_category_and_beneficiary_city(self):
+        def rows(connection, query, params=()):
+            if ".requests" in query:
+                self.assertEqual(params, (9,))
+                return [{"req_id": 9, "beneficiary_id": 4, "req_cat_id": 7,
+                         "req_subj": "Need help", "req_desc": "Description"}]
+            if ".help_categories" in query:
+                self.assertEqual(params, (7,))
+                return [{"cat_name": "Medical"}]
+            if ".users" in query:
+                self.assertEqual(params, (4,))
+                return [{"city_name": "San Jose"}]
+            raise AssertionError(query)
+        with patch.object(helpers, "fetch_rows", side_effect=rows):
+            self.assertIsNone(helpers.get_request_context(None, 9, 5))
+            self.assertEqual(helpers.get_request_context(None, 9, 4), {
+                "beneficiary_id": 4, "category": "Medical", "location": "San Jose",
+                "subject": "Need help", "description": "Description",
+            })
 
     def test_cached_geocode_and_provider_failures(self):
         calls = []
@@ -135,7 +215,10 @@ class DistanceTests(unittest.TestCase):
         ]
         with patch.object(lambda_function, "connect_database", return_value=connection), patch.object(
             lambda_function, "resolve_beneficiary_location", return_value=(0, 0),
-        ), patch.object(lambda_function, "get_orgs_from_db", return_value=db_rows), patch.object(
+        ), patch.object(lambda_function, "get_request_context", return_value={
+            "beneficiary_id": 4, "category": "Medical", "location": "San Jose",
+            "subject": "Need help", "description": "Description",
+        }), patch.object(lambda_function, "get_orgs_from_db", return_value=db_rows), patch.object(
             lambda_function, "get_ai_orgs", side_effect=RuntimeError("GenAI unavailable"),
         ):
             response = lambda_function.lambda_handler({"body": json.dumps({
@@ -163,6 +246,33 @@ class DistanceTests(unittest.TestCase):
             response = lambda_function.lambda_handler({"location": "San Jose", "category": "Education"}, None)
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(json.loads(response["body"])[0]["distance"], 0)
+
+    def test_handler_accepts_frontend_request_id_only_and_derives_search(self):
+        class Connection:
+            def close(self):
+                pass
+        context = {
+            "beneficiary_id": 4, "category": "Medical", "location": "San Jose",
+            "subject": "Need help", "description": "Description",
+        }
+        with patch.object(lambda_function, "connect_database", return_value=Connection()), patch.object(
+            lambda_function, "get_request_context", return_value=context,
+        ) as request_context, patch.object(
+            lambda_function, "resolve_beneficiary_location", return_value={
+                "coordinates": (0, 0), "status": "ok",
+            },
+        ) as location_lookup, patch.object(
+            lambda_function, "get_orgs_from_db", return_value=[{
+                "name": "Nearby", "latitude": 0, "longitude": 0,
+            }],
+        ) as db_source, patch.object(lambda_function, "get_ai_orgs", return_value=[]) as ai_source:
+            response = lambda_function.lambda_handler({"request_id": 9}, None)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(json.loads(response["body"])[0]["distance"], 0)
+        self.assertEqual(request_context.call_args.args[1:], (9, None))
+        self.assertEqual(location_lookup.call_args.args[1:3], (9, 4))
+        self.assertEqual(db_source.call_args.args[1:], ("San Jose", "Medical"))
+        self.assertEqual(ai_source.call_args.args, ("Need help", "Description", "San Jose", "Medical"))
 
     def test_handler_input_errors(self):
         self.assertEqual(lambda_function.lambda_handler({"body": "bad-json"}, None)["statusCode"], 400)

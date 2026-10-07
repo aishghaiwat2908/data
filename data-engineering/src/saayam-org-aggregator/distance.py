@@ -181,6 +181,10 @@ class GeocodeService:
 
 def add_distances(organizations, beneficiary, geocoder):
     """Decorate every record independently; a failed geocode never drops it."""
+    beneficiary_status = "unknown_location"
+    if isinstance(beneficiary, Mapping):
+        beneficiary_status = beneficiary.get("status", beneficiary_status)
+        beneficiary = parse_coordinates(beneficiary.get("coordinates"))
     results = []
     for original in organizations:
         row = original.copy()
@@ -196,6 +200,7 @@ def add_distances(organizations, beneficiary, geocoder):
                 results.append(row)
                 continue
             if beneficiary is None:
+                row["distance_status"] = beneficiary_status
                 results.append(row)
                 continue
             coordinates = parse_coordinates(row)
