@@ -46,7 +46,7 @@ class DistanceTests(unittest.TestCase):
     def test_alternate_live_identity_and_current_location_columns(self):
         def rows(connection, query, params=()):
             if "SELECT column_name" in query and params[1] == "requests":
-                return [{"column_name": name} for name in ("request_id", "req_for_id", "req_loc")]
+                return [{"column_name": name} for name in ("request_id", "beneficiary_id", "req_loc")]
             if "SELECT column_name" in query and params[1] == "user_locations":
                 return [{"column_name": name} for name in ("beneficiary_id", "curr_loc", "updated_at")]
             if "SELECT udt_name" in query:
@@ -147,6 +147,45 @@ class DistanceTests(unittest.TestCase):
         self.assertTrue(rows[0]["Collaborator"])
         self.assertIn("10 Main St", distance.organization_address(rows[0]))
 
+    def test_database_search_preserves_existing_rating_and_handles_state_code_schema(self):
+        def rows(connection, query, params=()):
+            self.assertEqual(params, ("Medical", "San Jose"))
+            if "LEFT JOIN" in query:
+                raise RuntimeError("organizations.state_id is not present")
+            self.assertIn("org_skills", query)
+            return [{
+                "org_name": "Clinic", "street": "10 Main St", "city_name": "San Jose",
+                "state_code": "CA", "zip_code": "95101", "size": "small", "rating": 5,
+                "Collaborator": True,
+            }]
+        with patch.object(helpers, "fetch_rows", side_effect=rows):
+            result = helpers.get_orgs_from_db(None, "San Jose", "Medical")
+        self.assertEqual(result[0]["rating"], 5)
+        self.assertEqual(result[0]["size"], "small")
+        self.assertTrue(result[0]["Collaborator"])
+        self.assertEqual(distance.organization_address(result[0]), "10 Main St, San Jose, CA, 95101")
+
+    def test_failed_query_rolls_back_before_schema_fallback(self):
+        class Cursor:
+            closed = False
+            def execute(self, query, params):
+                raise RuntimeError("missing column")
+            def close(self):
+                self.closed = True
+        class Connection:
+            rolled_back = False
+            def __init__(self):
+                self.last_cursor = Cursor()
+            def cursor(self):
+                return self.last_cursor
+            def rollback(self):
+                self.rolled_back = True
+        connection = Connection()
+        with self.assertRaisesRegex(RuntimeError, "missing column"):
+            helpers.fetch_rows(connection, "SELECT missing_column")
+        self.assertTrue(connection.rolled_back)
+        self.assertTrue(connection.last_cursor.closed)
+
     def test_request_context_reads_real_category_and_beneficiary_city(self):
         def rows(connection, query, params=()):
             if ".requests" in query:
@@ -166,6 +205,43 @@ class DistanceTests(unittest.TestCase):
                 "beneficiary_id": 4, "category": "Medical", "location": "San Jose",
                 "subject": "Need help", "description": "Description",
             })
+
+    def test_request_context_supports_city_join_and_does_not_treat_req_for_as_user(self):
+        def rows(connection, query, params=()):
+            if "SELECT column_name" in query:
+                names = {
+                    "requests": ("request_id", "beneficiary_id", "req_cat_id", "req_subj", "req_desc"),
+                    "users": ("user_id", "city_id"),
+                    "cities": ("city_id", "city_name"),
+                }
+                return [{"column_name": name} for name in names.get(params[1], ())]
+            if ".requests" in query:
+                self.assertIn("WHERE request_id = %s", query)
+                return [{"beneficiary_id": 4, "req_cat_id": 7, "req_subj": "Help", "req_desc": "Details"}]
+            if ".help_categories" in query:
+                return [{"cat_name": "Medical"}]
+            if ".users" in query:
+                self.assertIn("LEFT JOIN virginia_dev_saayam_rdbms.cities", query)
+                return [{"city_name": "San Jose"}]
+            raise AssertionError(query)
+        with patch.object(helpers, "fetch_rows", side_effect=rows):
+            context = helpers.get_request_context(None, 9)
+        self.assertEqual(context["location"], "San Jose")
+        self.assertEqual(context["beneficiary_id"], 4)
+
+        def legacy_rows(connection, query, params=()):
+            if "SELECT column_name" in query:
+                columns = ("req_id", "req_for_id", "req_cat_id", "req_subj", "req_desc")
+                return [{"column_name": name} for name in columns] if params[1] == "requests" else []
+            if ".requests" in query:
+                self.assertIn("NULL AS beneficiary_id", query)
+                return [{"beneficiary_id": None, "req_cat_id": 7, "req_subj": "Help", "req_desc": "Details"}]
+            if ".help_categories" in query:
+                return [{"cat_name": "Medical"}]
+            raise AssertionError(query)
+        with patch.object(helpers, "fetch_rows", side_effect=legacy_rows):
+            self.assertIsNone(helpers.get_request_context(None, 9, beneficiary_id=4))
+            self.assertIsNone(helpers.get_request_context(None, 9)["beneficiary_id"])
 
     def test_cached_geocode_and_provider_failures(self):
         calls = []

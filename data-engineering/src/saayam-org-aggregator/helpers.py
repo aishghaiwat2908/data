@@ -31,6 +31,13 @@ def fetch_rows(connection, query, parameters=()):
         cursor.execute(query, parameters)
         names = [column[0] for column in cursor.description]
         return [dict(zip(names, row)) for row in cursor.fetchall()]
+    except Exception:
+        # PostgreSQL rejects every later statement in a failed transaction
+        # until rollback; schema fallbacks need a usable connection.
+        rollback = getattr(connection, "rollback", None)
+        if callable(rollback):
+            rollback()
+        raise
     finally:
         cursor.close()
 
@@ -64,9 +71,17 @@ def _table_columns(connection, table):
 
 def get_request_context(connection, request_id, beneficiary_id=None):
     """Derive search inputs from the actual request, never the current viewer."""
+    request_columns = _table_columns(connection, "requests")
+    request_key = "req_id" if not request_columns or "req_id" in request_columns else "request_id"
+    # req_for_id is a request-for category in some schemas, not a user ID.
+    beneficiary_field = (
+        "beneficiary_id" if not request_columns or "beneficiary_id" in request_columns
+        else "NULL"
+    )
     rows = fetch_rows(connection, f"""
-        SELECT req_id, beneficiary_id, req_cat_id, req_subj, req_desc
-        FROM {SCHEMA}.requests WHERE req_id = %s
+        SELECT {request_key} AS req_id, {beneficiary_field} AS beneficiary_id,
+               req_cat_id, req_subj, req_desc
+        FROM {SCHEMA}.requests WHERE {request_key} = %s
     """, (request_id,))
     if not rows:
         return None
@@ -77,9 +92,20 @@ def get_request_context(connection, request_id, beneficiary_id=None):
     category_rows = fetch_rows(connection, f"""
         SELECT cat_name FROM {SCHEMA}.help_categories WHERE cat_id = %s
     """, (request.get("req_cat_id"),)) if request.get("req_cat_id") is not None else []
-    beneficiary_rows = fetch_rows(connection, f"""
-        SELECT city_name FROM {SCHEMA}.users WHERE user_id = %s
-    """, (actual_id,)) if actual_id is not None else []
+    user_columns = _table_columns(connection, "users")
+    city_columns = _table_columns(connection, "cities")
+    beneficiary_rows = []
+    if actual_id is not None:
+        if "city_id" in user_columns and {"city_id", "city_name"}.issubset(city_columns):
+            beneficiary_rows = fetch_rows(connection, f"""
+                SELECT ci.city_name FROM {SCHEMA}.users AS u
+                LEFT JOIN {SCHEMA}.cities AS ci ON ci.city_id = u.city_id
+                WHERE u.user_id = %s
+            """, (actual_id,))
+        elif not user_columns or "city_name" in user_columns:
+            beneficiary_rows = fetch_rows(connection, f"""
+                SELECT city_name FROM {SCHEMA}.users WHERE user_id = %s
+            """, (actual_id,))
     return {
         "beneficiary_id": actual_id,
         "category": category_rows[0].get("cat_name") if category_rows else None,
@@ -104,23 +130,29 @@ def get_orgs_from_db(connection, location, category):
             WHERE hc.cat_name = %s {city_clause}
         """, arguments)
     except Exception:
-        # Older deployments searched mission directly; retain that path if
-        # org_skills/category links are not available in the target schema.
-        rows = fetch_rows(connection, f"""
-        SELECT o.*, s.state_name, c.country_name, c.country_code
-        FROM {SCHEMA}.organizations AS o
-        LEFT JOIN {SCHEMA}.states AS s ON s.state_id = o.state_id
-        LEFT JOIN {SCHEMA}.countries AS c ON c.country_id = s.country_id
-        WHERE o.mission = %s {city_clause}
-        """, arguments)
+        # Some organization schemas have state_code rather than state_id. Keep
+        # the category search even when optional address-name joins fail.
+        try:
+            rows = fetch_rows(connection, f"""
+                SELECT DISTINCT o.* FROM {SCHEMA}.organizations AS o
+                JOIN {SCHEMA}.org_skills AS os ON os.org_id = o.org_id
+                JOIN {SCHEMA}.help_categories AS hc ON hc.cat_id = os.cat_id
+                WHERE hc.cat_name = %s {city_clause}
+            """, arguments)
+        except Exception:
+            # Older deployments searched mission directly.
+            rows = fetch_rows(connection, f"""
+                SELECT o.* FROM {SCHEMA}.organizations AS o
+                WHERE o.mission = %s {city_clause}
+            """, arguments)
     for row in rows:
-        row["name"] = row.get("org_name")
-        row["contact"] = row.get("phone")
-        row["location"] = row.get("city_name")
-        row["size"] = row.get("org_size")
-        row["rating"] = row.get("org_rating")
-        row["Collaborator"] = row.get("is_collaborator")
-        row["Org-type"] = row.get("org_type")
+        row["name"] = row.get("org_name") or row.get("name")
+        row["contact"] = row.get("phone") or row.get("contact")
+        row["location"] = row.get("city_name") or row.get("location")
+        row["size"] = row.get("org_size") if row.get("org_size") is not None else row.get("size")
+        row["rating"] = row.get("org_rating") if row.get("org_rating") is not None else row.get("rating")
+        row["Collaborator"] = row.get("is_collaborator") if row.get("is_collaborator") is not None else row.get("Collaborator")
+        row["Org-type"] = row.get("org_type") or row.get("Org-type")
         row["db_or_ai"] = "db"
     return rows
 
@@ -174,13 +206,14 @@ def resolve_beneficiary_location(connection, request_id=None, beneficiary_id=Non
     lookup_failed = False
     request_columns = _table_columns(connection, "requests")
     request_key = "req_id" if not request_columns or "req_id" in request_columns else "request_id"
-    beneficiary_key = "beneficiary_id" if not request_columns or "beneficiary_id" in request_columns else "req_for_id"
+    # Do not confuse req_for_id (a request-for category) with a beneficiary ID.
+    beneficiary_key = "beneficiary_id" if not request_columns or "beneficiary_id" in request_columns else None
 
     if request_id is not None:
         location_column = _location_expression(connection, "requests", "req_loc", "r")
         try:
             requests = fetch_rows(connection, f"""
-                SELECT r.{request_key} AS req_id, r.{beneficiary_key} AS beneficiary_id,
+                SELECT r.{request_key} AS req_id, {f'r.{beneficiary_key}' if beneficiary_key else 'NULL'} AS beneficiary_id,
                        {location_column}
                 FROM {SCHEMA}.requests AS r WHERE r.{request_key} = %s
             """, (request_id,))
@@ -201,7 +234,7 @@ def resolve_beneficiary_location(connection, request_id=None, beneficiary_id=Non
             coordinates = parse_coordinates(request.get("req_loc"))
             if coordinates is not None:
                 return finish(coordinates)
-    elif beneficiary_id is not None:
+    elif beneficiary_id is not None and beneficiary_key:
         # A request-details caller should send req_id. For beneficiary-only
         # callers, use that beneficiary's latest request, never the viewer's.
         location_column = _location_expression(connection, "requests", "req_loc", "r")

@@ -82,8 +82,10 @@ def address_from_parts(row, fields):
 
 def organization_address(row):
     if row.get("db_or_ai") == "db":
-        return address_from_parts(row, (
-            "street", "city_name", "state_name", "zip_code", "country_name",
+        address = dict(row)
+        address["resolved_state"] = row.get("state_name") or row.get("state_code")
+        return address_from_parts(address, (
+            "street", "city_name", "resolved_state", "zip_code", "country_name",
         ))
     location = row.get("location") or row.get("address")
     if isinstance(location, str):
