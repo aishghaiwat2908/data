@@ -1,6 +1,6 @@
 # Repository-first Lambda audit snapshot - issue #593
 
-This document records the pre-AWS repository audit. For deployed function names, verified console links, and reconciled counts, see [AWS_RECONCILIATION.md](AWS_RECONCILIATION.md).
+This document records the initial pre-AWS repository audit. Later PRs #613 and #615 added two Data Engineering workloads. For the current counts, deployed names, and verified console links, see [AWS_RECONCILIATION.md](AWS_RECONCILIATION.md).
 
 Repository-first audit on 2026-10-27. Sources: the `main`, `dev`, and `test` branches of `saayam-for-all/data`; all 18 issues labeled `data engineering`; all 17 labeled `Data Analysis`; and 45 Lambda-related issue search results (53 distinct issues in the union). Open PRs are separated from merged branch references.
 
