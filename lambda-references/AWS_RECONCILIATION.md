@@ -1,14 +1,14 @@
 # AWS Lambda reconciliation for issue #593
 
-Read-only console review on 2026-10-27. See [README.md](README.md) for the repository and issue audit, including the 53 reviewed tasks.
+Read-only console review and comparison with later PRs #613 and #615 on 2026-10-27. See [README.md](README.md) for the initial repository and issue audit, including the 53 reviewed tasks.
 
 ## Counts and scope
 
 | Measure | Data Engineering | Data Analytics |
 | --- | ---: | ---: |
-| Unique task-defined workloads in the GitHub review | 4 | 12 |
-| Deployed functions with a clear task/name match in this AWS account | 2 | 6 |
-| Remaining workloads without a verified one-to-one deployment match | 2 | 6 |
+| Unique task-defined workloads in the GitHub review | 6 | 12 |
+| Deployed functions with a clear task/name match in this AWS account | 3 | 6 |
+| Remaining workloads without a verified one-to-one deployment match | 3 | 6 |
 
 The deployed figures are **confirmed lower bounds**, not certified team totals. AWS function names do not encode team ownership, and a single deployed function can implement several tasks. Console visibility proves that a function exists; it does not prove successful invocation or production use.
 
@@ -21,7 +21,9 @@ Account alias: `revanth-saayam`. The console listed **213 Event Functions in us-
 | Organization aggregator | [#98](https://github.com/saayam-for-all/data/issues/98), [#113](https://github.com/saayam-for-all/data/issues/113), [#433](https://github.com/saayam-for-all/data/issues/433); [dev source](https://github.com/saayam-for-all/data/tree/dev/data-engineering/src/saayam-org-aggregator) | [`saayam-org-aggregator`](https://us-east-1.console.aws.amazon.com/lambda/home?region=us-east-1#/functions/saayam-org-aggregator), exact name. The [deploy script](https://github.com/saayam-for-all/data/blob/dev/data-engineering/scripts/deploy/deploy_aggregator.sh) says `org-aggregator`; align the script before using it. |
 | Help-request categorizer | [#100](https://github.com/saayam-for-all/data/issues/100); [dev handler](https://github.com/saayam-for-all/data/blob/dev/data-engineering/src/categorizer/handler.py) and [script](https://github.com/saayam-for-all/data/blob/dev/data-engineering/scripts/deploy/deploy_categorizer.sh) | Script expects `auto-categorizer`, which is absent. [`predict_category`](https://us-east-1.console.aws.amazon.com/lambda/home?region=us-east-1#/functions/predict_category) exists but is an unverified possible alias. |
 | Daily homepage metrics | [#103](https://github.com/saayam-for-all/data/issues/103); [dev handler](https://github.com/saayam-for-all/data/blob/dev/data-engineering/src/aggregate-daily-metrics/lambda_function.py) | [`aggregate-daily-metrics`](https://us-east-1.console.aws.amazon.com/lambda/home?region=us-east-1#/functions/aggregate-daily-metrics), exact name. [`statsForHomepage`](https://us-east-1.console.aws.amazon.com/lambda/home?region=us-east-1#/functions/statsForHomepage) also exists but could be a separate API; ownership needs confirmation. |
-| Request archive replacement | [#574](https://github.com/saayam-for-all/data/issues/574), [#582](https://github.com/saayam-for-all/data/issues/582); [open PR #584](https://github.com/saayam-for-all/data/pull/584) | Proposed `Data_ArchiveRequestData` name is absent. [`saayam-archive-fn`](https://us-east-1.console.aws.amazon.com/lambda/home?region=us-east-1#/functions/saayam-archive-fn) exists, perhaps the older function; do not treat it as the replacement without owner confirmation. |
+| Existing requests-to-S3 archive Lambda | [#416](https://github.com/saayam-for-all/data/issues/416); [open PR #615](https://github.com/saayam-for-all/data/pull/615) adds [`src/requests_archive`](https://github.com/saayam-for-all/data/tree/hpant5_416_archive_datapipeline_rdbms_s3/data-engineering/src/requests_archive) and a [deploy script](https://github.com/saayam-for-all/data/blob/hpant5_416_archive_datapipeline_rdbms_s3/data-engineering/scripts/deploy/deploy_requests_archive.sh) whose default name is `saayam-archive-fn` | [`saayam-archive-fn`](https://us-east-1.console.aws.amazon.com/lambda/home?region=us-east-1#/functions/saayam-archive-fn), exact script-name match; PR #615 reports it deployed and verified against the dev database. |
+| Content-filter/routing Lambda | [#422](https://github.com/saayam-for-all/data/issues/422); [open PR #613](https://github.com/saayam-for-all/data/pull/613) adds [Data Engineering Lambda entry point](https://github.com/saayam-for-all/data/pull/613/files) | PR #613 explicitly says nothing is deployed. [`checkProfanity`](https://us-east-1.console.aws.amazon.com/lambda/home?region=us-east-1#/functions/checkProfanity) and [`testCheckProfanity`](https://us-east-1.console.aws.amazon.com/lambda/home?region=us-east-1#/functions/testCheckProfanity) exist but are unverified aliases or older implementations. |
+| Request archive replacement | [#574](https://github.com/saayam-for-all/data/issues/574), [#582](https://github.com/saayam-for-all/data/issues/582); [open PR #584](https://github.com/saayam-for-all/data/pull/584) | Proposed `Data_ArchiveRequestData` name is absent. The deployed `saayam-archive-fn` is the existing #416 archive Lambda, not proof that this replacement has shipped. |
 
 ## Data Analytics
 
@@ -44,7 +46,7 @@ Account alias: `revanth-saayam`. The console listed **213 Event Functions in us-
 
 - [`upload-irs-data-to-s3`](https://us-east-1.console.aws.amazon.com/lambda/home?region=us-east-1#/functions/upload-irs-data-to-s3) resembles historical [#60](https://github.com/saayam-for-all/data/issues/60). The [Engineering tracker](https://github.com/saayam-for-all/data/blob/dev/data-engineering/TASK_TRACKER.md) says IRS data was later dropped, so it is excluded from the current Engineering total pending owner confirmation.
 - [`emergency_number_api`](https://us-east-1.console.aws.amazon.com/lambda/home?region=us-east-1#/functions/emergency_number_api) and [`emergencyContactInfo`](https://us-east-1.console.aws.amazon.com/lambda/home?region=us-east-1#/functions/emergencyContactInfo) resemble [#334](https://github.com/saayam-for-all/data/issues/334) and [#482](https://github.com/saayam-for-all/data/issues/482); team ownership is unclear.
-- [`checkProfanity`](https://us-east-1.console.aws.amazon.com/lambda/home?region=us-east-1#/functions/checkProfanity) and [`testCheckProfanity`](https://us-east-1.console.aws.amazon.com/lambda/home?region=us-east-1#/functions/testCheckProfanity) resemble [#422](https://github.com/saayam-for-all/data/issues/422) and [PR #559](https://github.com/saayam-for-all/data/pull/559); confirm whether either belongs to these teams.
+- [#422](https://github.com/saayam-for-all/data/issues/422) is now counted as a Data Engineering workload because [PR #613](https://github.com/saayam-for-all/data/pull/613) places its Lambda entry point under `data-engineering/src/profanity/`. The AWS functions named `checkProfanity` and `testCheckProfanity` still need alias/owner confirmation and are excluded from deployed team totals.
 
 ## Follow-up needed to certify totals
 
